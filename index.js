@@ -8,17 +8,20 @@ var CsvWriteStream = function(opts) {
 
   this.sendHeaders = opts.sendHeaders !== false
   this.headers = opts.headers || null
-  this.separator = opts.separator || opts.seperator || ','
+  this.separator = opts.separator === undefined || opts.separator === null ? ',' : opts.separator
+  this.sendMetadata = !!opts.sendMetadata
   this.newline = opts.newline || '\n'
 
   this._objRow = null
   this._arrRow = null
   this._first = true
+  this._destroyed = false
 }
 
 util.inherits(CsvWriteStream, stream.Transform)
 
 CsvWriteStream.prototype._compile = function(headers) {
+  var newline = this.newline
   var sep = this.separator
   var str = 'function toRow(obj) {\n'
 
@@ -29,15 +32,19 @@ CsvWriteStream.prototype._compile = function(headers) {
     return 'a'+i
   })
 
-  str += 'return '
+  for (var i = 0; i < headers.length; i += 500) { // do not overflow the callstack on lots of cols
+    var part = headers.length < 500 ? headers : headers.slice(i, i + 500)
+    str += i ? 'result += "'+sep+'" + ' : 'var result = '
+    part.forEach(function(prop, j) {
+      str += (j ? '+"'+sep+'"+' : '') + '(/['+sep+'\\r\\n"]/.test('+prop+') ? esc('+prop+'+"") : '+prop+')'
+    })
+    str += '\n'
+  }
 
-  headers.forEach(function(prop, i) {
-    str += (i ? '+"'+sep+'"+' : '') + '(/['+sep+'\\r\\n"]/.test('+prop+') ? esc('+prop+'+"") : '+prop+')'
-  })
+  str += 'return result +'+JSON.stringify(newline)+'\n}'
 
-  str += '+'+JSON.stringify(this.newline)+'\n}'
-
-  return new Function('esc', 'return '+str)(esc)
+  var escape = sep === '' ? noEsc : esc;
+  return new Function('esc', 'return '+str)(escape)
 }
 
 CsvWriteStream.prototype._transform = function(row, enc, cb) {
@@ -47,10 +54,8 @@ CsvWriteStream.prototype._transform = function(row, enc, cb) {
 
   if (this._first) {
     this._first = false
-
     var objProps = []
     var arrProps = []
-    var heads = []
 
     if (this.headers) {
       for (var i = 0; i < this.headers.length; i++) {
@@ -64,21 +69,32 @@ CsvWriteStream.prototype._transform = function(row, enc, cb) {
       }
       this.sendHeaders = false;
     }
-
-    this._objRow = this._compile(objProps)
     this._arrRow = this._compile(arrProps)
 
+    if (this.sendMetadata && this.separator) this.push('sep=' + this.separator + this.newline)
     if (this.sendHeaders) this.push(this._arrRow(this.headers))
   }
 
   if (isArray) {
-    if (!this.headers) return cb(new Error('no headers specified'))
     this.push(this._arrRow(row))
   } else {
+    if (!this.headers) return cb(new Error('no headers specified for object after the first element'))
     this.push(this._objRow(row))
   }
 
   cb()
+}
+
+CsvWriteStream.prototype.destroy = function (err) {
+  if (this._destroyed) return
+  this._destroyed = true
+
+  var self = this
+
+  process.nextTick(function () {
+    if (err) self.emit('error', err)
+    self.emit('close')
+  })
 }
 
 module.exports = function(opts) {
@@ -87,4 +103,7 @@ module.exports = function(opts) {
 
 function esc(cell) {
   return '"'+cell.replace(/"/g, '""')+'"'
+}
+function noEsc(cell) {
+  return cell;
 }
